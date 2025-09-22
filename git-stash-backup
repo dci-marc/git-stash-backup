@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- Configuration ---
+REMOTE="origin"
+BRANCH_PREFIX="stash-backup"
+
+# remember original branch to return to it at the end
+orig_branch=$(git rev-parse --abbrev-ref HEAD)
+
+# --- Helper: sanitize string for branch name ---
+sanitize_branch_name() {
+  local s="$1"
+  s=$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')
+  s=$(printf '%s' "$s" | sed 's/[^a-z0-9]/-/g')
+  s=$(printf '%s' "$s" | sed 's/-\{2,\}/-/g')
+  s=$(printf '%s' "$s" | sed 's/^-*//;s/-*$//')
+  s=${s//@\{}
+  s=${s:0:80}  # limit length to 50 characters
+  printf '%s' "$s"
+}
+
+echo "📦 Backing up all stashes..."
+
+if ! git rev-parse --git-dir >/dev/null 2>&1; then
+  echo "✖ Not a git repository."
+  exit 1
+fi
+
+mapfile -t stash_refs < <(git stash list --format='%gd')
+mapfile -t stash_msgs < <(git stash list --format='%s')
+
+if [ "${#stash_refs[@]}" -eq 0 ]; then
+  echo "ℹ️ No stashes found. Nothing to do."
+  exit 0
+fi
+
+count=0
+
+for ((i=${#stash_refs[@]}-1; i>=0; i--)); do
+  stash_ref="${stash_refs[i]}"
+  stash_msg="${stash_msgs[i]:-stash}"
+
+  timestamp=$(date +%Y%m%d-%H%M%S)
+  clean_msg=$(sanitize_branch_name "$stash_msg")
+  branch_name="${BRANCH_PREFIX}-${timestamp}-${i}"
+  if [ -n "$clean_msg" ]; then
+    branch_name="${branch_name}-${clean_msg}"
+  fi
+
+  echo "🌱 Creating branch '$branch_name' from ${stash_ref} ..."
+  if git stash branch "$branch_name" "$stash_ref"; then
+    # re-store the stash so it is not lost
+    git stash show -p "$stash_ref" | git stash store -m "$stash_msg" -
+
+    if [ -n "$(git status --porcelain)" ]; then
+      git add -A
+      git commit -m "${stash_msg}"
+      echo "🚀 Pushing ${branch_name} to ${REMOTE} ..."
+      git push --set-upstream "${REMOTE}" "${branch_name}"
+    fi
+
+    git checkout "$orig_branch" >/dev/null 2>&1 || true
+    count=$((count+1))
+  fi
+done
+
+echo "✅ Done! $count stash(es) backed up."
